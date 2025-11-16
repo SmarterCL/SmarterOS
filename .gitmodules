@@ -1,0 +1,4 @@
+[submodule "smarteros-specs"]
+	path = smarteros-specs
+	url = https://github.com/SmarterCL/smarteros-specs.git
+	branch = main
