@@ -1,0 +1,79 @@
+name: Build and Sync App to VPS (Mode B)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "app.smarterbot.cl/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-app
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Install dependencies (app)
+        working-directory: app.smarterbot.cl
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Next.js (standalone)
+        working-directory: app.smarterbot.cl
+        run: pnpm exec next build
+
+      - name: Ensure rsync present
+        run: |
+          if ! command -v rsync >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y rsync
+          fi
+
+      - name: Prepare SSH key (restricted user)
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SMARTEROS_HOST" >> ~/.ssh/known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SMARTEROS_RSYNC_KEY }}
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+
+      - name: Prepare remote directories
+        env:
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+          SMARTEROS_USER: smarteros
+          SMARTEROS_PATH: ${{ secrets.SMARTEROS_PATH }}
+        run: |
+          ssh ${SMARTEROS_USER}@${SMARTEROS_HOST} "mkdir -p ${SMARTEROS_PATH}/app.smarterbot.cl/.next/standalone ${SMARTEROS_PATH}/app.smarterbot.cl/.next/static ${SMARTEROS_PATH}/app.smarterbot.cl/public"
+
+      - name: Rsync build artifacts (Mode B)
+        env:
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+          SMARTEROS_USER: smarteros
+          SMARTEROS_PATH: ${{ secrets.SMARTEROS_PATH }}
+        run: |
+          RSYNC_OPTS="-az --delete"
+          rsync $RSYNC_OPTS app.smarterbot.cl/.next/standalone/ ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl/.next/standalone/
+          rsync $RSYNC_OPTS app.smarterbot.cl/.next/static/ ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl/.next/static/
+          rsync $RSYNC_OPTS app.smarterbot.cl/public/ ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl/public/
+          rsync $RSYNC_OPTS app.smarterbot.cl/package.json ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl/package.json
+          rsync $RSYNC_OPTS app.smarterbot.cl/next.config.mjs ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl/next.config.mjs
+
+      - name: Post-sync confirmation
+        run: echo "App build+sync a ${SMARTEROS_HOST}:${SMARTEROS_PATH}/app.smarterbot.cl (standalone)"

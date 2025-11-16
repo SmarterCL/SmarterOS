@@ -1,0 +1,158 @@
+name: "🤖 Tri-Agent: Scheduled Maintenance"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  maintenance:
+    name: "Gemini Health Check → Auto-Fix"
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      issues: write
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+      
+      - name: "🔐 Setup Vault"
+        run: |
+          wget -O vault.zip https://releases.hashicorp.com/vault/1.18.1/vault_1.18.1_linux_amd64.zip
+          unzip vault.zip
+          sudo mv vault /usr/local/bin/
+      
+      - name: "🔑 Authenticate to Vault"
+        run: |
+          VAULT_TOKEN=$(vault write -field=token auth/jwt/login \
+            role=github-actions \
+            jwt=${{ secrets.ACTIONS_ID_TOKEN_REQUEST_TOKEN }})
+          echo "::add-mask::$VAULT_TOKEN"
+          echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "📊 Director Gemini: System Health Check"
+        id: gemini
+        run: |
+          mkdir -p /tmp/smarteros/reports
+          
+          # Check for dependency updates
+          echo "Checking for outdated dependencies..."
+          pnpm outdated --format json > /tmp/smarteros/reports/outdated.json || true
+          
+          # Check logs for errors (via SSH to VPS)
+          echo "Checking VPS logs..."
+          vault kv get -field=private_key smarteros/ssh/deploy > ~/.ssh/id_rsa_smarteros
+          chmod 600 ~/.ssh/id_rsa_smarteros
+          
+          ssh -o StrictHostKeyChecking=accept-new smarteros \
+            'journalctl -u smarteros-app --since "24 hours ago" --no-pager | grep -E "ERROR|FATAL" | tail -20' \
+            > /tmp/smarteros/reports/errors.log || true
+          
+          # Check service health
+          echo "Checking service health..."
+          curl -sf https://app.smarterbot.cl/health > /tmp/smarteros/reports/health.json || echo '{"status":"unhealthy"}' > /tmp/smarteros/reports/health.json
+          
+          # Analyze and create maintenance plan
+          # TODO: Call Gemini API for analysis
+          
+          ERROR_COUNT=$(wc -l < /tmp/smarteros/reports/errors.log)
+          OUTDATED_COUNT=$(jq 'length' /tmp/smarteros/reports/outdated.json 2>/dev/null || echo 0)
+          
+          cat > /tmp/smarteros/plans/maintenance-$(date +%Y%m%d).json <<EOF
+          {
+            "tasks": [
+              {
+                "id": "update-deps",
+                "enabled": $([ "$OUTDATED_COUNT" -gt 0 ] && echo true || echo false),
+                "description": "Update ${OUTDATED_COUNT} outdated dependencies",
+                "priority": "low"
+              },
+              {
+                "id": "fix-errors",
+                "enabled": $([ "$ERROR_COUNT" -gt 0 ] && echo true || echo false),
+                "description": "Investigate and fix ${ERROR_COUNT} errors in logs",
+                "priority": "high"
+              }
+            ],
+            "metadata": {
+              "trigger": "scheduled_maintenance",
+              "date": "$(date -u +%Y-%m-%d)",
+              "error_count": $ERROR_COUNT,
+              "outdated_deps": $OUTDATED_COUNT
+            }
+          }
+          EOF
+          
+          echo "errors_found=$ERROR_COUNT" >> $GITHUB_OUTPUT
+          echo "updates_available=$OUTDATED_COUNT" >> $GITHUB_OUTPUT
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "✍️ Writer Copilot: Generate Fixes"
+        if: steps.gemini.outputs.errors_found > 0
+        run: |
+          echo "Errors detected, generating fixes..."
+          # TODO: Call Copilot API to generate error fixes
+          echo "Fix patches would be generated here"
+      
+      - name: "📊 Create Maintenance Report"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = JSON.parse(fs.readFileSync('/tmp/smarteros/plans/maintenance-' + new Date().toISOString().split('T')[0].replace(/-/g, '') + '.json'));
+            
+            const errorCount = ${{ steps.gemini.outputs.errors_found }};
+            const updateCount = ${{ steps.gemini.outputs.updates_available }};
+            
+            if (errorCount > 0 || updateCount > 0) {
+              // Create issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🔧 Scheduled Maintenance Report - ${new Date().toISOString().split('T')[0]}`,
+                labels: ['maintenance', 'auto'],
+                body: `## 🤖 Tri-Agent Maintenance Report\n\n` +
+                      `**Date**: ${new Date().toISOString()}\n` +
+                      `**Trigger**: Scheduled (daily)\n\n` +
+                      `### Findings\n\n` +
+                      `- **Errors in logs**: ${errorCount}\n` +
+                      `- **Outdated dependencies**: ${updateCount}\n\n` +
+                      `### Recommended Actions\n\n` +
+                      plan.tasks.filter(t => t.enabled).map(t => 
+                        `- [ ] ${t.description} (Priority: ${t.priority})`
+                      ).join('\n') + '\n\n' +
+                      `### Logs\n\n` +
+                      `<details>\n<summary>Recent Errors</summary>\n\n` +
+                      '```\n' + fs.readFileSync('/tmp/smarteros/reports/errors.log', 'utf8') + '\n```\n' +
+                      `</details>\n\n` +
+                      `---\n` +
+                      `*This issue was automatically created by the SmarterOS Tri-Agent system.*`
+              });
+            }
+      
+      - name: "💬 Notify Slack"
+        if: steps.gemini.outputs.errors_found > 0 || steps.gemini.outputs.updates_available > 0
+        run: |
+          WEBHOOK=$(vault kv get -field=webhook_url smarteros/mcp/slack)
+          
+          curl -X POST "$WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "🔧 Scheduled Maintenance Report",
+              "attachments": [{
+                "color": "${{ steps.gemini.outputs.errors_found > 0 && 'warning' || 'good' }}",
+                "fields": [
+                  {"title": "Errors Found", "value": "${{ steps.gemini.outputs.errors_found }}", "short": true},
+                  {"title": "Updates Available", "value": "${{ steps.gemini.outputs.updates_available }}", "short": true},
+                  {"title": "Date", "value": "'"$(date -u +%Y-%m-%d)"'", "short": true},
+                  {"title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>", "short": true}
+                ]
+              }]
+            }'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}

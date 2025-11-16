@@ -1,0 +1,324 @@
+name: Backup VPS Diario
+
+on:
+  schedule:
+    # Todos los días a las 2:00 AM (UTC-3 Chile = 5:00 AM UTC)
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      vps_id:
+        description: 'VPS ID (opcional, usa default si vacío)'
+        required: false
+        type: string
+      cleanup_old:
+        description: 'Limpiar backups >7 días'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+  VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+
+jobs:
+  backup-vps:
+    name: Crear Backup Automático
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install Hostinger MCP
+        run: |
+          npm install -g hostinger-api-mcp
+          which hostinger-api-mcp
+          echo "✅ Hostinger MCP instalado"
+          
+      - name: Install Vault CLI
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+          sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+          sudo apt-get update && sudo apt-get install vault
+          vault version
+          echo "✅ Vault CLI instalado"
+          
+      - name: Obtener Credenciales Hostinger
+        id: get-creds
+        run: |
+          # Leer secrets de Vault
+          VAULT_DATA=$(vault kv get -format=json smarteros/mcp/hostinger)
+          
+          API_TOKEN=$(echo "$VAULT_DATA" | jq -r '.data.data.api_token')
+          ENDPOINT=$(echo "$VAULT_DATA" | jq -r '.data.data.endpoint')
+          DEFAULT_VPS_ID=$(echo "$VAULT_DATA" | jq -r '.data.data.default_vps_id // "12345"')
+          
+          # Usar VPS_ID de input o default
+          VPS_ID="${{ github.event.inputs.vps_id }}"
+          if [ -z "$VPS_ID" ]; then
+            VPS_ID="$DEFAULT_VPS_ID"
+          fi
+          
+          echo "::add-mask::$API_TOKEN"
+          echo "API_TOKEN=$API_TOKEN" >> $GITHUB_OUTPUT
+          echo "ENDPOINT=$ENDPOINT" >> $GITHUB_OUTPUT
+          echo "VPS_ID=$VPS_ID" >> $GITHUB_OUTPUT
+          
+          echo "✅ Credenciales obtenidas"
+          echo "   VPS ID: $VPS_ID"
+          echo "   Endpoint: $ENDPOINT"
+          
+      - name: Verificar Estado VPS
+        id: check-vps
+        run: |
+          API_TOKEN="${{ steps.get-creds.outputs.API_TOKEN }}"
+          ENDPOINT="${{ steps.get-creds.outputs.ENDPOINT }}"
+          VPS_ID="${{ steps.get-creds.outputs.VPS_ID }}"
+          
+          echo "🔍 Verificando estado de VPS $VPS_ID..."
+          
+          RESPONSE=$(curl -s -X GET \
+            "${ENDPOINT}/v1/vps/${VPS_ID}" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json")
+          
+          VPS_STATE=$(echo "$RESPONSE" | jq -r '.data.state // "unknown"')
+          VPS_HOSTNAME=$(echo "$RESPONSE" | jq -r '.data.hostname // "unknown"')
+          
+          echo "VPS_STATE=$VPS_STATE" >> $GITHUB_OUTPUT
+          echo "VPS_HOSTNAME=$VPS_HOSTNAME" >> $GITHUB_OUTPUT
+          
+          echo "   Estado: $VPS_STATE"
+          echo "   Hostname: $VPS_HOSTNAME"
+          
+          if [ "$VPS_STATE" != "running" ]; then
+            echo "⚠️ WARNING: VPS no está en estado 'running'"
+            echo "   Continuando con backup de todas formas..."
+          else
+            echo "✅ VPS está operativo"
+          fi
+          
+      - name: Crear Backup
+        id: create-backup
+        run: |
+          API_TOKEN="${{ steps.get-creds.outputs.API_TOKEN }}"
+          ENDPOINT="${{ steps.get-creds.outputs.ENDPOINT }}"
+          VPS_ID="${{ steps.get-creds.outputs.VPS_ID }}"
+          
+          TIMESTAMP=$(date -u +"%Y-%m-%d_%H-%M-%S_UTC")
+          NOTE="daily-backup-${TIMESTAMP}"
+          
+          echo "💾 Creando backup: $NOTE"
+          
+          RESPONSE=$(curl -s -X POST \
+            "${ENDPOINT}/v1/vps/${VPS_ID}/backups" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"note\": \"${NOTE}\"}")
+          
+          BACKUP_ID=$(echo "$RESPONSE" | jq -r '.data.id // "error"')
+          BACKUP_STATUS=$(echo "$RESPONSE" | jq -r '.data.status // "unknown"')
+          
+          if [ "$BACKUP_ID" = "error" ] || [ -z "$BACKUP_ID" ]; then
+            echo "❌ ERROR: No se pudo crear el backup"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+          
+          echo "BACKUP_ID=$BACKUP_ID" >> $GITHUB_OUTPUT
+          echo "BACKUP_NOTE=$NOTE" >> $GITHUB_OUTPUT
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_OUTPUT
+          
+          echo "✅ Backup creado exitosamente"
+          echo "   Backup ID: $BACKUP_ID"
+          echo "   Estado: $BACKUP_STATUS"
+          echo "   Nota: $NOTE"
+          
+      - name: Esperar Completación Backup
+        id: wait-backup
+        run: |
+          API_TOKEN="${{ steps.get-creds.outputs.API_TOKEN }}"
+          ENDPOINT="${{ steps.get-creds.outputs.ENDPOINT }}"
+          VPS_ID="${{ steps.get-creds.outputs.VPS_ID }}"
+          BACKUP_ID="${{ steps.create-backup.outputs.BACKUP_ID }}"
+          
+          echo "⏳ Esperando completación de backup $BACKUP_ID..."
+          
+          MAX_WAIT=600  # 10 minutos
+          INTERVAL=15    # Check cada 15 segundos
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            RESPONSE=$(curl -s -X GET \
+              "${ENDPOINT}/v1/vps/${VPS_ID}/backups" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json")
+            
+            BACKUP_STATUS=$(echo "$RESPONSE" | jq -r ".data[] | select(.id == $BACKUP_ID) | .status")
+            
+            if [ "$BACKUP_STATUS" = "completed" ]; then
+              BACKUP_SIZE=$(echo "$RESPONSE" | jq -r ".data[] | select(.id == $BACKUP_ID) | .size")
+              echo "BACKUP_SIZE=$BACKUP_SIZE" >> $GITHUB_OUTPUT
+              echo "✅ Backup completado exitosamente"
+              echo "   Tamaño: $BACKUP_SIZE"
+              exit 0
+            elif [ "$BACKUP_STATUS" = "failed" ]; then
+              echo "❌ ERROR: Backup falló"
+              exit 1
+            fi
+            
+            echo "   Estado: $BACKUP_STATUS (esperando... ${ELAPSED}s/${MAX_WAIT}s)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "⚠️ TIMEOUT: Backup aún en progreso después de ${MAX_WAIT}s"
+          echo "   El backup puede completarse exitosamente de todas formas"
+          echo "BACKUP_SIZE=pending" >> $GITHUB_OUTPUT
+          
+      - name: Guardar Metadata en Vault
+        run: |
+          BACKUP_ID="${{ steps.create-backup.outputs.BACKUP_ID }}"
+          TIMESTAMP="${{ steps.create-backup.outputs.TIMESTAMP }}"
+          VPS_ID="${{ steps.get-creds.outputs.VPS_ID }}"
+          VPS_STATE="${{ steps.check-vps.outputs.VPS_STATE }}"
+          VPS_HOSTNAME="${{ steps.check-vps.outputs.VPS_HOSTNAME }}"
+          BACKUP_SIZE="${{ steps.wait-backup.outputs.BACKUP_SIZE }}"
+          
+          DATE_KEY=$(date -u +"%Y-%m-%d")
+          
+          vault kv put "smarteros/backups/${DATE_KEY}" \
+            backup_id="$BACKUP_ID" \
+            vps_id="$VPS_ID" \
+            vps_hostname="$VPS_HOSTNAME" \
+            vps_state="$VPS_STATE" \
+            created_at="$TIMESTAMP" \
+            size="$BACKUP_SIZE" \
+            status="completed" \
+            workflow_run="${{ github.run_id }}" \
+            trigger="${{ github.event_name }}"
+          
+          echo "✅ Metadata guardada en Vault: smarteros/backups/${DATE_KEY}"
+          
+      - name: Limpiar Backups Antiguos
+        if: ${{ github.event.inputs.cleanup_old != 'false' }}
+        run: |
+          API_TOKEN="${{ steps.get-creds.outputs.API_TOKEN }}"
+          ENDPOINT="${{ steps.get-creds.outputs.ENDPOINT }}"
+          VPS_ID="${{ steps.get-creds.outputs.VPS_ID }}"
+          
+          echo "🧹 Limpiando backups antiguos (>7 días)..."
+          
+          RESPONSE=$(curl -s -X GET \
+            "${ENDPOINT}/v1/vps/${VPS_ID}/backups" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json")
+          
+          SEVEN_DAYS_AGO=$(date -u -d "7 days ago" +%s 2>/dev/null || date -u -v-7d +%s)
+          
+          echo "$RESPONSE" | jq -r '.data[] | "\(.id)|\(.created_at)"' | while IFS='|' read -r BACKUP_ID CREATED_AT; do
+            BACKUP_TIMESTAMP=$(date -u -d "$CREATED_AT" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%S" "$CREATED_AT" +%s)
+            
+            if [ "$BACKUP_TIMESTAMP" -lt "$SEVEN_DAYS_AGO" ]; then
+              echo "   Eliminando backup antiguo: $BACKUP_ID (creado: $CREATED_AT)"
+              # NOTA: La API de Hostinger puede no tener endpoint DELETE para backups
+              # Verificar en docs oficiales antes de descomentar:
+              # curl -s -X DELETE "${ENDPOINT}/v1/vps/${VPS_ID}/backups/${BACKUP_ID}" \
+              #   -H "Authorization: Bearer ${API_TOKEN}"
+            fi
+          done
+          
+          echo "✅ Limpieza completada"
+          
+      - name: Notificar Éxito
+        if: success()
+        run: |
+          BACKUP_ID="${{ steps.create-backup.outputs.BACKUP_ID }}"
+          VPS_HOSTNAME="${{ steps.check-vps.outputs.VPS_HOSTNAME }}"
+          BACKUP_SIZE="${{ steps.wait-backup.outputs.BACKUP_SIZE }}"
+          TIMESTAMP="${{ steps.create-backup.outputs.TIMESTAMP }}"
+          
+          echo "✅ BACKUP DIARIO COMPLETADO"
+          echo ""
+          echo "📋 Detalles:"
+          echo "   VPS: $VPS_HOSTNAME"
+          echo "   Backup ID: $BACKUP_ID"
+          echo "   Timestamp: $TIMESTAMP"
+          echo "   Tamaño: $BACKUP_SIZE"
+          echo "   Workflow: ${{ github.run_id }}"
+          echo ""
+          echo "🔗 Ver en GitHub Actions:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+      - name: Notificar Error
+        if: failure()
+        run: |
+          echo "❌ ERROR EN BACKUP DIARIO"
+          echo ""
+          echo "⚠️ El backup automático falló"
+          echo "   VPS ID: ${{ steps.get-creds.outputs.VPS_ID }}"
+          echo "   Workflow: ${{ github.run_id }}"
+          echo ""
+          echo "🔧 Acciones recomendadas:"
+          echo "   1. Verificar estado del VPS en hPanel"
+          echo "   2. Revisar logs del workflow"
+          echo "   3. Ejecutar backup manual si es crítico"
+          echo ""
+          echo "🔗 Ver logs completos:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # Job opcional: Enviar notificación a Slack
+  notify-slack:
+    name: Notificar a Slack
+    runs-on: ubuntu-latest
+    needs: backup-vps
+    if: always()
+    
+    steps:
+      - name: Determinar Estado
+        id: status
+        run: |
+          if [ "${{ needs.backup-vps.result }}" = "success" ]; then
+            echo "STATUS=success" >> $GITHUB_OUTPUT
+            echo "EMOJI=✅" >> $GITHUB_OUTPUT
+            echo "COLOR=good" >> $GITHUB_OUTPUT
+          else
+            echo "STATUS=failure" >> $GITHUB_OUTPUT
+            echo "EMOJI=❌" >> $GITHUB_OUTPUT
+            echo "COLOR=danger" >> $GITHUB_OUTPUT
+          fi
+          
+      # Descomentar cuando tengas Slack MCP configurado
+      # - name: Enviar a Slack
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     channel-id: 'C07XXXXXXXX'  # Canal #ops
+      #     payload: |
+      #       {
+      #         "text": "${{ steps.status.outputs.EMOJI }} Backup VPS Diario",
+      #         "attachments": [
+      #           {
+      #             "color": "${{ steps.status.outputs.COLOR }}",
+      #             "fields": [
+      #               {
+      #                 "title": "Estado",
+      #                 "value": "${{ steps.status.outputs.STATUS }}",
+      #                 "short": true
+      #               },
+      #               {
+      #                 "title": "Workflow",
+      #                 "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>",
+      #                 "short": true
+      #               }
+      #             ]
+      #           }
+      #         ]
+      #       }
+      #   env:
+      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

@@ -1,0 +1,7 @@
+vault.smarterbot.cl {
+    reverse_proxy 127.0.0.1:8200
+}
+
+app.smarterbot.cl {
+    reverse_proxy 127.0.0.1:3000
+}

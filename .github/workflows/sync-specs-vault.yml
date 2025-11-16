@@ -1,0 +1,53 @@
+name: Sync Specs to VPS (Vault OIDC)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "smarteros-specs/**"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: sync-specs
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Vault Login (OIDC)
+        uses: hashicorp/vault-action@v3
+        with:
+          url: https://vault.smarterbot.cl
+          method: jwt
+          role: github-actions
+          jwtGithubAudience: vault
+          secrets: |
+            smarteros/data/ssh/deploy private_key | SMARTEROS_RSYNC_KEY
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SMARTEROS_RSYNC_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SMARTEROS_HOST" >> ~/.ssh/known_hosts
+        env:
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+
+      - name: Rsync specs
+        env:
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+          SMARTEROS_USER: smarteros
+          SMARTEROS_PATH: ${{ secrets.SMARTEROS_PATH }}
+        run: |
+          rsync -az --delete --exclude .git smarteros-specs/ ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/smarteros-specs/
+
+      - name: Confirm
+        run: echo "Specs synced via Vault OIDC"

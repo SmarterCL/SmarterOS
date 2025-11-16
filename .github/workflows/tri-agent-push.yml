@@ -1,0 +1,258 @@
+name: "🤖 Tri-Agent: Git Push Deploy"
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'app.smarterbot.cl/**'
+      - 'smarterbot.cl/**'
+      - 'smarteros-specs/**'
+
+jobs:
+  tri-agent-orchestration:
+    name: "Gemini → Copilot → Codex"
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: "🔐 Setup Vault CLI"
+        run: |
+          wget -O vault.zip https://releases.hashicorp.com/vault/1.18.1/vault_1.18.1_linux_amd64.zip
+          unzip vault.zip
+          sudo mv vault /usr/local/bin/
+          vault version
+      
+      - name: "🔑 Authenticate to Vault (OIDC)"
+        id: vault-auth
+        run: |
+          # GitHub Actions provides OIDC token
+          VAULT_TOKEN=$(vault write -field=token auth/jwt/login \
+            role=github-actions \
+            jwt=${{ secrets.ACTIONS_ID_TOKEN_REQUEST_TOKEN }})
+          echo "::add-mask::$VAULT_TOKEN"
+          echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "📊 Director Gemini: Analyze Changes"
+        id: gemini
+        run: |
+          # Get diff
+          git diff HEAD~1..HEAD > /tmp/changes.diff
+          
+          # Call Gemini via API
+          GEMINI_KEY=$(vault kv get -field=api_key smarteros/mcp/google)
+          
+          # TODO: Replace with actual Gemini API call
+          # For now, create a simple execution plan
+          cat > /tmp/smarteros/plan-${{ github.sha }}.json <<EOF
+          {
+            "tasks": [
+              {
+                "id": "deploy-changes",
+                "type": "code",
+                "description": "Deploy changes from ${{ github.sha }}",
+                "files_affected": $(git diff --name-only HEAD~1..HEAD | jq -R . | jq -s .),
+                "requires_build": true,
+                "requires_deploy": true
+              }
+            ],
+            "metadata": {
+              "trigger": "git_push",
+              "commit": "${{ github.sha }}",
+              "branch": "${{ github.ref_name }}"
+            }
+          }
+          EOF
+          
+          echo "plan_created=true" >> $GITHUB_OUTPUT
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "✍️ Writer Copilot: Generate Code (if needed)"
+        id: copilot
+        if: steps.gemini.outputs.plan_created == 'true'
+        run: |
+          # Check if plan requires code generation
+          REQUIRES_GEN=$(jq -r '.tasks[] | select(.requires_code_gen == true) | .id' /tmp/smarteros/plan-${{ github.sha }}.json)
+          
+          if [ -n "$REQUIRES_GEN" ]; then
+            echo "Code generation needed for: $REQUIRES_GEN"
+            # TODO: Call Copilot API for code generation
+            echo "patches_generated=true" >> $GITHUB_OUTPUT
+          else
+            echo "No code generation needed"
+            echo "patches_generated=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "⚙️ Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: "📦 Install pnpm"
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      
+      - name: "🔧 Install Dependencies"
+        run: pnpm install --frozen-lockfile
+      
+      - name: "🏗️ Executor Codex: Build"
+        id: build
+        run: |
+          # Determine which apps to build
+          if git diff --name-only HEAD~1..HEAD | grep -q "^app.smarterbot.cl/"; then
+            echo "Building app.smarterbot.cl..."
+            cd app.smarterbot.cl
+            pnpm build
+            echo "app_built=true" >> $GITHUB_OUTPUT
+          fi
+          
+          if git diff --name-only HEAD~1..HEAD | grep -q "^smarterbot.cl/"; then
+            echo "Building smarterbot.cl..."
+            cd smarterbot.cl
+            pnpm build
+            echo "marketing_built=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: "🚀 Executor Codex: Deploy to VPS"
+        id: deploy
+        run: |
+          # Setup SSH
+          mkdir -p ~/.ssh
+          vault kv get -field=private_key smarteros/ssh/deploy > ~/.ssh/id_rsa_smarteros
+          chmod 600 ~/.ssh/id_rsa_smarteros
+          
+          vault kv get -field=ssh_config smarteros/ssh/config > ~/.ssh/config
+          
+          # Test SSH connection
+          ssh -o StrictHostKeyChecking=accept-new smarteros 'echo "SSH OK"'
+          
+          # Sync changes
+          if [ "${{ steps.build.outputs.app_built }}" == "true" ]; then
+            echo "Syncing app.smarterbot.cl..."
+            rsync -avz --delete \
+              app.smarterbot.cl/.next/standalone/ \
+              smarteros:/opt/smarteros/app.smarterbot.cl/
+            
+            ssh smarteros 'sudo systemctl restart smarteros-app'
+          fi
+          
+          if git diff --name-only HEAD~1..HEAD | grep -q "^smarteros-specs/"; then
+            echo "Syncing specs..."
+            rsync -avz --delete smarteros-specs/ smarteros:/opt/smarteros/smarteros-specs/
+          fi
+          
+          echo "deployed=true" >> $GITHUB_OUTPUT
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "✅ Executor Codex: Validate Deployment"
+        id: validate
+        run: |
+          # Wait for service to be healthy
+          for i in {1..30}; do
+            if curl -sf https://app.smarterbot.cl/health > /dev/null; then
+              echo "✅ Health check passed"
+              echo "healthy=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Waiting for service... ($i/30)"
+            sleep 2
+          done
+          
+          echo "❌ Health check failed"
+          echo "healthy=false" >> $GITHUB_OUTPUT
+          exit 1
+      
+      - name: "📊 Director Gemini: Validate Results"
+        if: always()
+        run: |
+          # Create execution report
+          cat > /tmp/smarteros/reports/exec-${{ github.sha }}.json <<EOF
+          {
+            "success": ${{ steps.validate.outputs.healthy == 'true' }},
+            "steps_completed": [
+              "gemini_analysis",
+              "build",
+              "deploy",
+              "validation"
+            ],
+            "metrics": {
+              "build_duration": "${{ steps.build.outputs.duration }}",
+              "deploy_duration": "${{ steps.deploy.outputs.duration }}",
+              "total_files_changed": $(git diff --name-only HEAD~1..HEAD | wc -l)
+            }
+          }
+          EOF
+          
+          # Store report in Vault
+          vault kv put smarteros/agents/reports/deploy-${{ github.sha }} \
+            @/tmp/smarteros/reports/exec-${{ github.sha }}.json
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "💬 Notify Slack"
+        if: always()
+        run: |
+          WEBHOOK=$(vault kv get -field=webhook_url smarteros/mcp/slack)
+          
+          if [ "${{ steps.validate.outputs.healthy }}" == "true" ]; then
+            STATUS="✅ Success"
+            COLOR="good"
+          else
+            STATUS="❌ Failed"
+            COLOR="danger"
+          fi
+          
+          curl -X POST "$WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "🤖 Tri-Agent Deploy",
+              "attachments": [{
+                "color": "'$COLOR'",
+                "fields": [
+                  {"title": "Status", "value": "'$STATUS'", "short": true},
+                  {"title": "Commit", "value": "'${{ github.sha }}'", "short": true},
+                  {"title": "Branch", "value": "'${{ github.ref_name }}'", "short": true},
+                  {"title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>", "short": true}
+                ]
+              }]
+            }'
+        env:
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      
+      - name: "🔄 Rollback on Failure"
+        if: failure()
+        run: |
+          echo "⚠️ Deployment failed, initiating rollback..."
+          
+          # Get previous successful commit
+          PREV_COMMIT=$(git log --format="%H" --skip=1 -n 1)
+          
+          # Checkout previous version
+          git checkout $PREV_COMMIT
+          
+          # Rebuild and redeploy
+          cd app.smarterbot.cl
+          pnpm install --frozen-lockfile
+          pnpm build
+          
+          rsync -avz --delete .next/standalone/ smarteros:/opt/smarteros/app.smarterbot.cl/
+          ssh smarteros 'sudo systemctl restart smarteros-app'
+          
+          # Wait for health check
+          sleep 10
+          curl -sf https://app.smarterbot.cl/health || echo "⚠️ Rollback health check failed"

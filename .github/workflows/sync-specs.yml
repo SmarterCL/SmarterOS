@@ -1,0 +1,47 @@
+name: Sync SmarterOS Specs to VPS
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "smarteros-specs/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-specs
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Ensure rsync present
+        run: |
+          if ! command -v rsync >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y rsync
+          fi
+
+      - name: Prepare SSH key (restricted user)
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SMARTEROS_HOST" >> ~/.ssh/known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SMARTEROS_RSYNC_KEY }}
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+
+      - name: Rsync smarteros-specs
+        env:
+          SMARTEROS_HOST: ${{ secrets.SMARTEROS_HOST }}
+          SMARTEROS_USER: smarteros
+          SMARTEROS_PATH: ${{ secrets.SMARTEROS_PATH }}
+        run: |
+          RSYNC_OPTS="-az --delete --exclude .git"
+          rsync $RSYNC_OPTS smarteros-specs/ ${SMARTEROS_USER}@${SMARTEROS_HOST}:${SMARTEROS_PATH}/smarteros-specs/
+
+      - name: Post-sync confirmation
+        run: echo "Specs sincronizadas contra ${SMARTEROS_HOST}"
