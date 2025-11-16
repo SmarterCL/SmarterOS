@@ -1,0 +1,55 @@
+# Secrets y credenciales
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.ppk
+secrets/
+vault-tokens/
+
+# Docker local con passwords
+dkcompose/docker-compose.yml
+dkcompose/.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Temporal
+tmp/
+temp/
+*.tmp
+
+# Workspace específico
+smartercl.code-workspace
+pnpm-workspace.yaml
+sync-smarteros.sh
+tsconfig.base.json
+VAULT-SETUP.md
+README.md
