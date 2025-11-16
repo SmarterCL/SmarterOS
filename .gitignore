@@ -52,4 +52,8 @@ pnpm-workspace.yaml
 sync-smarteros.sh
 tsconfig.base.json
 VAULT-SETUP.md
-README.md
+/README.md
+
+# Servicios front - permitir READMEs
+!front/*/README.md
+!services/*/README.md
