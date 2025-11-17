@@ -1,0 +1,83 @@
+name: DR Testing Monthly
+
+"on":
+  schedule:
+    # Run on the first day of each month at 3 AM Santiago time
+    - cron: '0 6 1 * *'  # 3 AM Santiago = 6 AM UTC
+  workflow_dispatch:
+    inputs:
+      notification_channel:
+        description: 'Slack channel for notifications'
+        required: false
+        default: '#ops-alerts'
+
+jobs:
+  disaster-recovery-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_DEPLOY_KEY }}
+      
+      - name: Run DR Tests
+        run: |
+          ssh -o StrictHostKeyChecking=no root@89.116.23.167 'bash -s' < smarteros-specs/scripts/dr-test.sh
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Upload Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-test-logs-${{ github.run_number }}
+          path: /var/log/smarteros/dr-tests/
+          retention-days: 90
+      
+      - name: Notify Slack on Success
+        if: success()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "channel": "${{ github.event.inputs.notification_channel || '#ops-alerts' }}",
+              "text": "✅ Disaster Recovery Test passed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*✅ Disaster Recovery Test - PASSED*\n\nAll backup and restore procedures validated successfully.\n\n*Run ID:* ${{ github.run_number }}\n*Date:* $(date +'%Y-%m-%d %H:%M:%S')\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Notify Slack on Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "channel": "${{ github.event.inputs.notification_channel || '#ops-alerts' }}",
+              "text": "❌ Disaster Recovery Test FAILED",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*❌ Disaster Recovery Test - FAILED*\n\n⚠️ One or more backup/restore procedures failed. Immediate action required.\n\n*Run ID:* ${{ github.run_number }}\n*Date:* $(date +'%Y-%m-%d %H:%M:%S')\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>\n\n<!channel> @ops-team"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
