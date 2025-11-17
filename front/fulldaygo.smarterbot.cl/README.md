@@ -1,34 +1,30 @@
-# fulldaygo.smarterbot.cl — Full Day Go Marketplace
+# Argentina Mobile App
 
-Este directorio alojará el código del marketplace Full Day Go para el subdominio `fulldaygo.smarterbot.cl`.
+*Automatically synced with your [v0.dev](https://v0.dev) deployments*
 
-## Instrucciones rápidas
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/smarterbotcl/v0-argentina-mobile-app)
+[![Built with v0](https://img.shields.io/badge/Built%20with-v0.dev-black?style=for-the-badge)](https://v0.dev/chat/projects/ZpFdKjxUHBd)
 
-### Clonar el repositorio
-```bash
-git clone https://github.com/SmarterCL/fulldaygo.smarterbot.cl .
-```
+## Overview
 
-### Variables de entorno (SSO con app.smarterbot.cl vía Supabase)
-```bash
-export NEXT_PUBLIC_SUPABASE_URL="${SUPABASE_URL}"
-export NEXT_PUBLIC_SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY}"
-export SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY}"
-```
-
-### Desarrollo local (opcional)
-```bash
-pnpm install || npm ci
-pnpm dev || npm run dev
-```
+This repository will stay in sync with your deployed chats on [v0.dev](https://v0.dev).
+Any changes you make to your deployed app will be automatically pushed to this repository from [v0.dev](https://v0.dev).
 
 ## Deployment
 
-El deployment en el VPS se realiza vía Docker Compose usando `dkcompose/docker-compose.front-services.yml` con Traefik.
+Your project is live at:
 
-## Características
+**[https://vercel.com/smarterbotcl/v0-argentina-mobile-app](https://vercel.com/smarterbotcl/v0-argentina-mobile-app)**
 
-- **Login compartido**: Usa las mismas credenciales de Supabase que app.smarterbot.cl
-- **SSO**: Cross-domain session habilitado
-- **Puerto**: 3030
-- **Proxy**: Traefik con SSL automático (Let's Encrypt)
+## Build your app
+
+Continue building your app on:
+
+**[https://v0.dev/chat/projects/ZpFdKjxUHBd](https://v0.dev/chat/projects/ZpFdKjxUHBd)**
+
+## How It Works
+
+1. Create and modify your project using [v0.dev](https://v0.dev)
+2. Deploy your chats from the v0 interface
+3. Changes are automatically pushed to this repository
+4. Vercel deploys the latest version from this repository
