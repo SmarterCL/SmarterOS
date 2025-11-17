@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "automations": [
+    {
+      "name": "Enriquecimiento: Google Contacts (MCP)",
+      "event": "conversation_created",
+      "active": true,
+      "description": "Lookup de contacto en Google Contacts vía MCP y actualización en Chatwoot",
+      "actions": [
+        {
+          "action_name": "run_webhook",
+          "action_params": {
+            "url": "https://mcp.smarterbot.cl/tools/google.contacts.lookup",
+            "http_method": "post",
+            "payload": {
+              "phone": "{{contact.phone_number}}",
+              "email": "{{contact.email}}",
+              "name": "{{contact.name}}",
+              "account_id": "{{account.id}}",
+              "contact_id": "{{contact.id}}",
+              "conversation_id": "{{conversation.id}}"
+            },
+            "headers": {
+              "Content-Type": "application/json",
+              "X-SMOS-Tenant": "{{account.id}}"
+            }
+          }
+        }
+      ],
+      "conditions": [
+        {
+          "attribute_key": "channel",
+          "filter_operator": "equal_to",
+          "values": ["channel:whatsapp"]
+        }
+      ]
+    },
+    {
+      "name": "Clasificación de intención (MCP AI)",
+      "event": "message_created",
+      "active": true,
+      "description": "Clasifica intención del mensaje y etiqueta la conversación",
+      "actions": [
+        {
+          "action_name": "run_webhook",
+          "action_params": {
+            "url": "https://mcp.smarterbot.cl/tools/smarteros.classifyIntent",
+            "http_method": "post",
+            "payload": {
+              "text": "{{message.content}}",
+              "conversation_id": "{{conversation.id}}",
+              "account_id": "{{account.id}}"
+            }
+          }
+        }
+      ],
+      "conditions": []
+    },
+    {
+      "name": "Responder plantilla bienvenida (tenant)",
+      "event": "message_created",
+      "active": true,
+      "description": "Auto-respuesta inicial para tenants individuales",
+      "actions": [
+        {
+          "action_name": "send_message",
+          "action_params": {
+            "message": "Gracias por escribir, estamos revisando tu consulta",
+            "message_type": "outgoing"
+          }
+        }
+      ],
+      "conditions": [
+        {
+          "attribute_key": "inbox",
+          "filter_operator": "equal_to",
+          "values": ["whatsapp"]
+        }
+      ]
+    }
+  ]
+}
