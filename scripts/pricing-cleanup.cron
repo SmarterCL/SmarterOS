@@ -1,0 +1,26 @@
+# Crontab Configuration for SmarterOS Compliance
+# Limpieza automática de precios (prioridad baja)
+#
+# Instalación:
+#   1. Hacer el script ejecutable: chmod +x /Users/mac/dev/2025/scripts/remove-pricing-mentions.sh
+#   2. Instalar crontab: crontab /Users/mac/dev/2025/scripts/pricing-cleanup.cron
+#   3. Verificar: crontab -l
+#
+# Frecuencia: Domingos a las 3:00 AM (Chile UTC-3)
+# Prioridad: BAJA
+
+# Formato: min hora día mes día_semana comando
+# min: 0-59
+# hora: 0-23
+# día: 1-31
+# mes: 1-12
+# día_semana: 0-7 (0 y 7 = domingo)
+
+# Limpieza de precios: Domingos a las 3:00 AM
+0 3 * * 0 /bin/bash /Users/mac/dev/2025/scripts/remove-pricing-mentions.sh >> /Users/mac/dev/2025/.logs/cron-pricing-cleanup.log 2>&1
+
+# Backup del log cada mes (primer día del mes a las 4:00 AM)
+0 4 1 * * gzip -c /Users/mac/dev/2025/.logs/cron-pricing-cleanup.log > /Users/mac/dev/2025/.logs/backups/cron-pricing-cleanup-$(date +\%Y\%m).log.gz && echo "" > /Users/mac/dev/2025/.logs/cron-pricing-cleanup.log
+
+# Health check: Verificar que el script existe (cada lunes a las 8:00 AM)
+0 8 * * 1 [ -f /Users/mac/dev/2025/scripts/remove-pricing-mentions.sh ] && echo "✅ Script exists" || echo "❌ Script missing" | mail -s "Pricing Cleanup Health Check" smarterbotcl@gmail.com
