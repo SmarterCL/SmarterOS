@@ -10,7 +10,9 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 app.use(express.json({ limit: '1mb' }))
 app.use(morgan('tiny'))
 
-app.get('/health', (req, res) => res.json({ ok: true }))
+app.get('/health', (req, res) => {
+  return res.json({ status: 'ok', service: 'mcp-smarterbot' })
+})
 
 // MCP Tools
 app.post('/tools/google.contacts.lookup', async (req, res) => {
